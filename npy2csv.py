@@ -1,3 +1,5 @@
+#leonehuo@gmail.com on 2025/02/20
+
 import numpy as np
 import csv
 import os
@@ -34,9 +36,9 @@ def npy_to_csv(npy_file: str, csv_file: str):
 
 if __name__ == "__main__":
     # 读取用户输入的文件路径
-    npy_file = input("Enter the .npy file path: ").strip()
+    npy_file = input("Enter the .npy file name: ").strip()
     if not os.path.isfile(npy_file):
-        print("The provided .npy file path is invalid.")
+        print("The provided .npy file name is invalid.")
         exit(1)
 
     # 生成 CSV 文件的路径
