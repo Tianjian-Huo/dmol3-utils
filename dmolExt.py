@@ -49,20 +49,29 @@ class read_outputdmol():
             # **2. 读取原子坐标 + 读取力**
             elif "df              ATOMIC  COORDINATES (au)" in line:
                 output_coordinate = lines[i + 2:i + 2 + atom_n]  
-                formatted_output_coordinate = [
-                    [float(x.strip().split()[2]), float(x.strip().split()[3]), float(x.strip().split()[4])]
-                    for x in output_coordinate
-                ]
+                
+                formatted_output_coordinate = []
+                formatted_output_species = []
+                formatted_output_forces = []
+
+                for x in output_coordinate:
+                    x = self.fix_broken_numbers(x)  # 修复错误负号拼接
+
+                    split_line = x.strip().split()
+
+                    if len(split_line) == 8:  # 确保数据完整
+                        formatted_output_species.append(split_line[1])
+                        formatted_output_coordinate.append(
+                            [float(split_line[2]), float(split_line[3]), float(split_line[4])]
+                        )
+                        formatted_output_forces.append(
+                            [float(split_line[5]), float(split_line[6]), float(split_line[7])]
+                        )
+                    else:
+                        print(f"数据格式异常，跳过该行: {x}")
+
                 step_data['coordinates (au)'] = formatted_output_coordinate
-
-                formatted_output_species = [x.strip().split()[1] for x in output_coordinate]
                 step_data['species'] = formatted_output_species
-
-                # **同时读取三方向的力**
-                formatted_output_forces = [
-                    [float(x.strip().split()[5]), float(x.strip().split()[6]), float(x.strip().split()[7])]
-                    for x in output_coordinate
-                ]
                 step_data['forces (au)'] = formatted_output_forces  
 
             # **3. 读取 Step 信息**
@@ -98,6 +107,10 @@ class read_outputdmol():
                 }
 
         return all_steps_data
+
+    def fix_broken_numbers(self, line):
+        """ 修复数值拼接错误，例如 '68.559875-107.243239' """
+        return re.sub(r'(\d)\s*([-+])\s*(\d)', r'\1 \2\3', line)
 
     def fix_scientific_notation(self, force_str):
         """ 处理科学计数法格式 """
