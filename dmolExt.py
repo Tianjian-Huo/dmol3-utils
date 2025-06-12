@@ -3,7 +3,11 @@ import sys
 import numpy as np
 import re
 
-class read_outputdmol():
+# 更高精度的单位换算常数
+HARTREE_TO_EV = 27.211386245988  # 1 Ha = 27.211386245988 eV
+ROUND_DECIMALS = 8             # 保留小数位数，可根据需求调整
+
+class read_outputdmol:
     def __init__(self, outdmol_path: str) -> None:
         self.outdmol_path = outdmol_path  # 输出文件路径
 
@@ -16,9 +20,9 @@ class read_outputdmol():
         return None
 
     def Iron_step(self) -> list:
-        """ 解析输出文件，提取计算数据 """
-        all_steps_data = []  
-        atom_n = self.atom_number()  # 获取原子数量
+        """ 解析输出文件，提取计算数据，所有数值保留指定位数 """
+        all_steps_data = []
+        atom_n = self.atom_number()
 
         with open(self.outdmol_path) as f:
             lines = f.readlines()
@@ -29,127 +33,113 @@ class read_outputdmol():
             'species': [],
             'step': None,
             'max force (au)': None,
-            'forces (au)': []  # 存储所有原子的力
+            'forces (au)': []
         }
 
         for i, line in enumerate(lines):
-            # **1. 读取 SCF 总能量**
+            # 1. 读取 SCF 总能量
             if 'Total Energy           Binding E       Cnvgnce     Time   Iter' in line:
                 for j in range(i + 1, len(lines)):
-                    energy_line = lines[j].strip()
-                    if 'Message: SCF converged' in energy_line:
-                        energy_value = lines[j - 1].split()[1]  
-                        if energy_value.endswith("Ha"):
-                            energy_value_eV = float(energy_value[:-2]) * 27.212  
-                            step_data['energy (eV)'] = energy_value_eV
+                    if 'Message: SCF converged' in lines[j]:
+                        val = lines[j - 1].split()[1]
+                        if val.endswith('Ha'):
+                            energy_ha = float(val[:-2])
+                            energy_eV = energy_ha * HARTREE_TO_EV
+                            step_data['energy (eV)'] = round(energy_eV, ROUND_DECIMALS)
                         break
-                    elif 'Error: SCF iterations not converged' in energy_line:
-                        return all_steps_data  
+                    if 'Error: SCF iterations not converged' in lines[j]:
+                        return all_steps_data
 
-            # **2. 读取原子坐标 + 读取力**
-            elif "df              ATOMIC  COORDINATES (au)" in line:
-                output_coordinate = lines[i + 2:i + 2 + atom_n]  
-                
-                formatted_output_coordinate = []
-                formatted_output_species = []
-                formatted_output_forces = []
+            # 2. 读取原子坐标 + 读取力
+            elif 'df              ATOMIC  COORDINATES (au)' in line:
+                block = lines[i + 2 : i + 2 + atom_n]
+                coords, species, forces = [], [], []
+                for x in block:
+                    x = self.fix_broken_numbers(x)
+                    parts = x.strip().split()
+                    if len(parts) == 8:
+                        _, atom, xau, yau, zau, fx, fy, fz = parts
+                        species.append(atom)
+                        coords.append([
+                            round(float(xau), ROUND_DECIMALS),
+                            round(float(yau), ROUND_DECIMALS),
+                            round(float(zau), ROUND_DECIMALS)
+                        ])
+                        forces.append([
+                            round(float(fx), ROUND_DECIMALS),
+                            round(float(fy), ROUND_DECIMALS),
+                            round(float(fz), ROUND_DECIMALS)
+                        ])
+                step_data['coordinates (au)'] = coords
+                step_data['species'] = species
+                step_data['forces (au)'] = forces
 
-                for x in output_coordinate:
-                    x = self.fix_broken_numbers(x)  # 修复错误负号拼接
-
-                    split_line = x.strip().split()
-
-                    if len(split_line) == 8:  # 确保数据完整
-                        formatted_output_species.append(split_line[1])
-                        formatted_output_coordinate.append(
-                            [float(split_line[2]), float(split_line[3]), float(split_line[4])]
-                        )
-                        formatted_output_forces.append(
-                            [float(split_line[5]), float(split_line[6]), float(split_line[7])]
-                        )
-                    else:
-                        print(f"数据格式异常，跳过该行: {x}")
-
-                step_data['coordinates (au)'] = formatted_output_coordinate
-                step_data['species'] = formatted_output_species
-                step_data['forces (au)'] = formatted_output_forces  
-
-            # **3. 读取 Step 信息**
+            # 3. 读取 Step 信息
             elif 'Step' in line:
-                step_match = re.search(r"Step\s+(\d+)", line)
-                if step_match:
-                    step = int(step_match.group(1))
-                    step_data['step'] = step  
+                m = re.search(r"Step\s+(\d+)", line)
+                if m:
+                    step_data['step'] = int(m.group(1))
 
-            # **4. 读取最大力**
-            elif " |  |F|max   |" in line:
-                force_match = re.search(r"\|\s*\|F\|max\s*\|\s*(-?\d+\.\d+E?-?\d*)", line)
-                if force_match:
-                    force_str = force_match.group(1)
-                    force_str = self.fix_scientific_notation(force_str)  
+            # 4. 读取最大力
+            elif '|  |F|max   |' in line:
+                m = re.search(r"\|\s*\|F\|max\s*\|\s*(-?\d+\.\d+E?[+-]?\d*)", line)
+                if m:
+                    fs = self.fix_scientific_notation(m.group(1))
                     try:
-                        max_force_au = float(force_str)
-                        step_data['max force (au)'] = max_force_au
-                    except ValueError as e:
-                        print(f"Error converting force value: {force_str} -> {e}")
-                        step_data['max force (au)'] = None  
+                        max_f = float(fs)
+                        step_data['max force (au)'] = round(max_f, ROUND_DECIMALS)
+                    except ValueError:
+                        step_data['max force (au)'] = None
 
-            # **存储数据**
-            if step_data['max force (au)'] is not None and step_data['coordinates (au)']:
-                all_steps_data.append(step_data.copy())  
-                step_data = {  
+            # 存储数据
+            if step_data['coordinates (au)'] and step_data['max force (au)'] is not None:
+                all_steps_data.append(step_data.copy())
+                step_data = {
                     'energy (eV)': None,
                     'coordinates (au)': [],
                     'species': [],
                     'step': None,
                     'max force (au)': None,
-                    'forces (au)': []  
+                    'forces (au)': []
                 }
 
         return all_steps_data
 
-    def fix_broken_numbers(self, line):
+    def fix_broken_numbers(self, line: str) -> str:
         """ 修复数值拼接错误，例如 '68.559875-107.243239' """
         return re.sub(r'(\d)\s*([-+])\s*(\d)', r'\1 \2\3', line)
 
-    def fix_scientific_notation(self, force_str):
+    def fix_scientific_notation(self, s: str) -> str:
         """ 处理科学计数法格式 """
-        if 'E' in force_str:
-            if force_str[-1] == 'E':  
-                force_str = force_str + '00'
-            elif force_str[-2:] == 'E+':  
-                force_str = force_str + '00'
-            elif force_str[-3:] == 'E-':  
-                force_str = force_str + '00'
-        return force_str
+        if 'E' in s and (s.endswith('E') or s.endswith('E+') or s.endswith('E-')):
+            s += '00'
+        return s
+
 
 if __name__ == '__main__':
-    current_directory = input("请输入文件路径: ").strip()
-    absolute_path = os.path.abspath(current_directory)
-    folder_name = os.path.basename(absolute_path)
-
+    current_directory = input('请输入文件路径: ').strip()
     if not os.path.isdir(current_directory):
-        print("提供的路径无效，请检查路径并重新运行程序。")
+        print('提供的路径无效，请检查路径并重新运行程序。')
         sys.exit(1)
 
-    folder_prefix = 'dmol3'  
-    outdmol_paths = []  
-    data = []
-
+    folder_name = os.path.basename(os.path.abspath(current_directory))
+    outdmol_paths = []
     for root, dirs, files in os.walk(current_directory):
-        if os.path.basename(root).startswith(folder_prefix):  
-            file_path = os.path.join(root, "dmol.outmol")  
-            if os.path.isfile(file_path):
-                outdmol_paths.append(file_path)
+        for fname in files:
+            if fname.lower().endswith('.outmol'):
+                outdmol_paths.append(os.path.join(root, fname))
 
-    with open(folder_name + '_paths.txt', 'w') as file:  
-        for idx, path in enumerate(outdmol_paths, 0):
-            abs_path = os.path.abspath(path)
-            outdmol = read_outputdmol(path)
-            print(f"\r正在处理: {abs_path}", end='', flush=True)
-            file.write(f"{idx} {abs_path}\n")  
-            data.append(outdmol.Iron_step())  
+    with open(folder_name + '_paths.txt', 'w') as f:
+        for idx, p in enumerate(outdmol_paths):
+            f.write(f"{idx} {p}\n")
 
-    data = np.array(data, dtype=object)                        
-    np.save(folder_name + '.npy', data)
-    print("\n处理完成！")
+    data = []
+    for path in outdmol_paths:
+        print(f"正在处理: {path}")
+        reader = read_outputdmol(path)
+        steps = reader.Iron_step()
+        print(f" → 解析到 {len(steps)} 步数据")
+        data.append(steps)
+
+    np.save(folder_name + '.npy', np.array(data, dtype=object))
+    print('处理完成，保存至', folder_name + '.npy')
