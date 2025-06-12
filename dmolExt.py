@@ -1,145 +1,173 @@
 import os
 import sys
-import numpy as np
 import re
+import numpy as np
 
-# 更高精度的单位换算常数
-HARTREE_TO_EV = 27.211386245988  # 1 Ha = 27.211386245988 eV
-ROUND_DECIMALS = 8             # 保留小数位数，可根据需求调整
+ROUND_DECIMALS = 8  # 保留小数位数
+
+def clean_num(x: float) -> float:
+    """
+    先格式化到 ROUND_DECIMALS 位小数，
+    再去掉末尾多余的 '0' 和小数点，
+    转回 float 以让 Python repr 自动省略不必要的 0。
+    """
+    s = f"{x:.{ROUND_DECIMALS}f}".rstrip('0').rstrip('.')
+    return float(s)
 
 class read_outputdmol:
     def __init__(self, outdmol_path: str) -> None:
-        self.outdmol_path = outdmol_path  # 输出文件路径
+        self.outdmol_path = outdmol_path
 
     def atom_number(self) -> int:
-        """ 获取原子数量 """
         with open(self.outdmol_path) as f:
             for line in f:
                 if 'N_atoms =' in line:
                     return int(line.split()[2])
-        return None
+        return 0
+
+    def fix_broken_numbers(self, line: str) -> str:
+        return re.sub(r'(\d)\s*([-+])\s*(\d)', r'\1 \2\3', line)
+
+    def fix_scientific_notation(self, s: str) -> str:
+        if 'E' in s and (s.endswith('E') or s.endswith('E+') or s.endswith('E-')):
+            s += '00'
+        return s
 
     def Iron_step(self) -> list:
-        """ 解析输出文件，提取计算数据，所有数值保留指定位数 """
-        all_steps_data = []
+        all_steps = []
         atom_n = self.atom_number()
 
         with open(self.outdmol_path) as f:
             lines = f.readlines()
 
+        # 每步数据模板，含 orb (eV)
         step_data = {
-            'energy (eV)': None,
+            'energy (Ha)':    None,
             'coordinates (au)': [],
-            'species': [],
-            'step': None,
-            'max force (au)': None,
-            'forces (au)': []
+            'species':         [],
+            'step':            None,
+            'max force (au)':  None,
+            'forces (au)':     [],
+            'orb (eV)':        []
         }
 
-        for i, line in enumerate(lines):
-            # 1. 读取 SCF 总能量
-            if 'Total Energy           Binding E       Cnvgnce     Time   Iter' in line:
-                for j in range(i + 1, len(lines)):
-                    if 'Message: SCF converged' in lines[j]:
-                        val = lines[j - 1].split()[1]
-                        if val.endswith('Ha'):
-                            energy_ha = float(val[:-2])
-                            energy_eV = energy_ha * HARTREE_TO_EV
-                            step_data['energy (eV)'] = round(energy_eV, ROUND_DECIMALS)
-                        break
-                    if 'Error: SCF iterations not converged' in lines[j]:
-                        return all_steps_data
+        i = 0
+        while i < len(lines):
+            L = lines[i]
 
-            # 2. 读取原子坐标 + 读取力
-            elif 'df              ATOMIC  COORDINATES (au)' in line:
-                block = lines[i + 2 : i + 2 + atom_n]
-                coords, species, forces = [], [], []
-                for x in block:
-                    x = self.fix_broken_numbers(x)
-                    parts = x.strip().split()
-                    if len(parts) == 8:
-                        _, atom, xau, yau, zau, fx, fy, fz = parts
-                        species.append(atom)
+            # 1. SCF 总能量 (Ha)
+            if 'Total Energy           Binding E       Cnvgnce     Time   Iter' in L:
+                for j in range(i+1, len(lines)):
+                    t = lines[j].strip()
+                    if 'Message: SCF converged' in t:
+                        val = lines[j-1].split()[1]
+                        if val.endswith('Ha'):
+                            e_ha = float(val[:-2])
+                            step_data['energy (Ha)'] = clean_num(e_ha)
+                        break
+                    if 'Error: SCF iterations not converged' in t:
+                        return all_steps
+
+            # 2. 轨道能级
+            elif L.strip().startswith('state') and 'eigenvalue' in L and 'occupation' in L:
+                orb_list = []
+                # 跳到数据行：跳过表头(i)、单位行(i+1)、空行(i+2)
+                j = i + 3
+                # 只要行以数字开头就继续读
+                while j < len(lines) and re.match(r'\s*\d+', lines[j]):
+                    parts = lines[j].split()
+                    if len(parts) >= 7:
+                        state_str = ' '.join(parts[0:4])
+                        ev_ev     = clean_num(float(parts[5]))
+                        occ       = clean_num(float(parts[6]))
+                        orb_list.append((state_str, ev_ev, occ))
+                    j += 1
+                step_data['orb (eV)'] = orb_list
+                i = j
+                continue
+
+            # 3. 原子坐标 + 力
+            elif 'df              ATOMIC  COORDINATES (au)' in L:
+                block = lines[i+2 : i+2+atom_n]
+                coords, sp, fs = [], [], []
+                for row in block:
+                    row = self.fix_broken_numbers(row)
+                    p = row.strip().split()
+                    if len(p) == 8:
+                        _, atom, xau, yau, zau, fx, fy, fz = p
+                        sp.append(atom)
                         coords.append([
-                            round(float(xau), ROUND_DECIMALS),
-                            round(float(yau), ROUND_DECIMALS),
-                            round(float(zau), ROUND_DECIMALS)
+                            clean_num(float(xau)),
+                            clean_num(float(yau)),
+                            clean_num(float(zau))
                         ])
-                        forces.append([
-                            round(float(fx), ROUND_DECIMALS),
-                            round(float(fy), ROUND_DECIMALS),
-                            round(float(fz), ROUND_DECIMALS)
+                        fs.append([
+                            clean_num(float(fx)),
+                            clean_num(float(fy)),
+                            clean_num(float(fz))
                         ])
                 step_data['coordinates (au)'] = coords
-                step_data['species'] = species
-                step_data['forces (au)'] = forces
+                step_data['species']         = sp
+                step_data['forces (au)']     = fs
 
-            # 3. 读取 Step 信息
-            elif 'Step' in line:
-                m = re.search(r"Step\s+(\d+)", line)
+            # 4. 步数编号
+            elif 'Step' in L:
+                m = re.search(r"Step\s+(\d+)", L)
                 if m:
                     step_data['step'] = int(m.group(1))
 
-            # 4. 读取最大力
-            elif '|  |F|max   |' in line:
-                m = re.search(r"\|\s*\|F\|max\s*\|\s*(-?\d+\.\d+E?[+-]?\d*)", line)
+            # 5. 最大力
+            elif '|  |F|max   |' in L:
+                m = re.search(r"\|\s*\|F\|max\s*\|\s*(-?\d+\.\d+E?[+-]?\d*)", L)
                 if m:
-                    fs = self.fix_scientific_notation(m.group(1))
+                    num = self.fix_scientific_notation(m.group(1))
                     try:
-                        max_f = float(fs)
-                        step_data['max force (au)'] = round(max_f, ROUND_DECIMALS)
+                        step_data['max force (au)'] = clean_num(float(num))
                     except ValueError:
                         step_data['max force (au)'] = None
 
-            # 存储数据
+            # 存储并重置，保留 orb (eV)
             if step_data['coordinates (au)'] and step_data['max force (au)'] is not None:
-                all_steps_data.append(step_data.copy())
+                all_steps.append(step_data.copy())
                 step_data = {
-                    'energy (eV)': None,
+                    'energy (Ha)':    None,
                     'coordinates (au)': [],
-                    'species': [],
-                    'step': None,
-                    'max force (au)': None,
-                    'forces (au)': []
+                    'species':         [],
+                    'step':            None,
+                    'max force (au)':  None,
+                    'forces (au)':     [],
+                    'orb (eV)':        step_data['orb (eV)']
                 }
 
-        return all_steps_data
+            i += 1
 
-    def fix_broken_numbers(self, line: str) -> str:
-        """ 修复数值拼接错误，例如 '68.559875-107.243239' """
-        return re.sub(r'(\d)\s*([-+])\s*(\d)', r'\1 \2\3', line)
-
-    def fix_scientific_notation(self, s: str) -> str:
-        """ 处理科学计数法格式 """
-        if 'E' in s and (s.endswith('E') or s.endswith('E+') or s.endswith('E-')):
-            s += '00'
-        return s
+        return all_steps
 
 
 if __name__ == '__main__':
     current_directory = input('请输入文件路径: ').strip()
     if not os.path.isdir(current_directory):
-        print('提供的路径无效，请检查路径并重新运行程序。')
+        print('提供的路径无效，请检查后重试。')
         sys.exit(1)
 
-    folder_name = os.path.basename(os.path.abspath(current_directory))
-    outdmol_paths = []
-    for root, dirs, files in os.walk(current_directory):
-        for fname in files:
-            if fname.lower().endswith('.outmol'):
-                outdmol_paths.append(os.path.join(root, fname))
+    folder = os.path.basename(os.path.abspath(current_directory))
+    paths = []
+    for root, _, files in os.walk(current_directory):
+        for fn in files:
+            if fn.lower().endswith('.outmol'):
+                paths.append(os.path.join(root, fn))
 
-    with open(folder_name + '_paths.txt', 'w') as f:
-        for idx, p in enumerate(outdmol_paths):
-            f.write(f"{idx} {p}\n")
+    with open(f'{folder}_paths.txt', 'w') as f:
+        for idx, p in enumerate(paths):
+            f.write(f'{idx} {p}\n')
 
-    data = []
-    for path in outdmol_paths:
-        print(f"正在处理: {path}")
-        reader = read_outputdmol(path)
+    all_data = []
+    for p in paths:
+        print(f'Processing {p} ...', end='')
+        reader = read_outputdmol(p)
         steps = reader.Iron_step()
-        print(f" → 解析到 {len(steps)} 步数据")
-        data.append(steps)
+        print(f' parsed {len(steps)} steps')
+        all_data.append(steps)
 
-    np.save(folder_name + '.npy', np.array(data, dtype=object))
-    print('处理完成，保存至', folder_name + '.npy')
+    np.save(f'{folder}.npy', np.array(all_data, dtype=object))
+    print('Done. Saved to', f'{folder}.npy')
